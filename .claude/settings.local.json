@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l .planning/tutorials/*.md)",
+      "Bash(grep -h \"name:\" commands/*/index.ts commands/*.ts)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -v \"//\")"
+    ]
+  }
+}
