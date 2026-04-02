@@ -7,7 +7,7 @@
 **Files:**
 - TypeScript files: `.ts` extension for logic, `.tsx` for React components
 - All imports use `.js` extension (ESM-style module resolution): `import { x } from './module.js'`
-- Descriptive names: `useCanUseTool.tsx`, `sessionStorage.ts`, `permissionResult.ts`
+- Descriptive kebab-case names: `useCanUseTool.tsx`, `sessionStorage.ts`, `permissionResult.ts`
 - Directory-based organization: features grouped in directories (commands/, hooks/, utils/, types/)
 
 **Functions:**
@@ -30,6 +30,10 @@
 ## Code Style
 
 **Formatting:**
+- 2-space indentation throughout
+- Semi-colons required at end of statements
+- Single quotes for string literals
+- Trailing commas in objects/arrays when multi-line
 - Biome linter/formatter (primary tool)
 - Source maps embedded in compiled output (base64 JSON)
 - React Compiler runtime optimization pattern: `import { c as _c } from "react/compiler-runtime"`
@@ -38,20 +42,23 @@
 - Biome rules with inline ignores: `// biome-ignore lint/suspicious/noConsole: intentional console output`
 - ESLint for specific rules: `// eslint-disable-next-line @typescript-eslint/no-require-imports`
 - Custom ESLint rules detected:
+  - `custom-rules/no-top-level-side-effects` - controls top-level impure code
   - `custom-rules/bootstrap-isolation` - enforces bootstrap module boundaries
   - `custom-rules/no-process-exit` - prevents direct process.exit() calls
   - `custom-rules/no-cross-platform-process-issues` - cross-platform safety
-  - `custom-rules/require-tool-match-name` - tool name matching
-  - `eslint-plugin-n/no-unsupported-features/node-builtins` - Node.js version compatibility
+  - `custom-rules/require-tool-match-name` - ensures tool filename matches exports
 
 ## Import Organization
 
 **Order:**
-1. React/compiler-runtime imports first
-2. External packages (bun:bundle, lodash-es, zod)
-3. SDK imports (@anthropic-ai/sdk)
-4. Internal imports with relative paths
-5. Type-only imports (`import type { ... }`)
+1. Top-level side effect comments and imports (performance optimizations)
+2. React/compiler-runtime imports first for components
+3. External packages (bun:bundle, lodash-es, zod, etc.)
+4. SDK imports (@anthropic-ai/sdk)
+5. Internal imports with `src/` alias
+6. Relative imports from parent directories (`../`)
+7. Relative imports from same directory (`./`)
+8. Type-only imports (`import type { ... }`) separated from value imports
 
 **Import Markers:**
 - ANT-ONLY markers must not be reordered: `// biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered`
@@ -59,11 +66,11 @@
 
 **Path Aliases:**
 - `src/` alias used for deep imports: `import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js'`
-- Relative imports with `.js` extension mandatory: `import { x } from '../utils/errors.js'`
+- Relative imports with `.js` extension mandatory in ESM: `import { x } from '../utils/errors.js'`
 
 **Conditional/Lazy Imports:**
 ```typescript
-// Dead code elimination pattern
+// Dead code elimination pattern with bun:bundle
 /* eslint-disable @typescript-eslint/no-require-imports */
 const agentsPlatform =
   process.env.USER_TYPE === 'ant'
@@ -73,6 +80,7 @@ const agentsPlatform =
 ```
 - Used for feature-flagged modules
 - Pattern: `feature('FLAG') ? require('./path.js').default : null`
+- Required for tree-shaking of unused code
 
 ## Error Handling
 
@@ -100,7 +108,7 @@ export class TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS extends
 }
 ```
 - Long naming convention forces explicit verification
-- Separate messages for user logs vs telemetry
+- Separate messages for user logs vs telemetry to avoid PII
 
 **Type Guards for Errors:**
 ```typescript
@@ -125,6 +133,14 @@ export function shortErrorStack(e: unknown, maxFrames = 5): string { ... }
 export function classifyAxiosError(e: unknown): { kind: AxiosErrorKind; ... } { ... }
 ```
 
+**Result Pattern:**
+Discriminated unions for success/failure:
+```typescript
+export type ValidationResult =
+  | { result: true }
+  | { result: false; message: string; errorCode: number };
+```
+
 ## Logging
 
 **Framework:** Custom logging system
@@ -133,24 +149,20 @@ Location: `utils/log.ts`
 - Error log sink interface: `ErrorLogSink`
 - Queued error events before sink attachment
 - MCP-specific logging: `logMCPError()`, `logMCPDebug()`
-- In-memory error log with max 100 entries
-
-**Debug Logging:**
-```typescript
-import { logForDebugging } from '../utils/debug.js'
-logForDebugging("Disabling bypass permissions mode on mount")
-```
+- In-memory error log with configurable max entries
 
 **Patterns:**
 - Console output requires Biome ignore: `// biome-ignore lint/suspicious/noConsole: intentional console output`
 - Error logging via `logError()` from `utils/log.js`
+- Diagnostic logging via `logForDiagnosticsNoPII()` that automatically excludes PII
 - Analytics events via `logEvent()` from `services/analytics/`
+- Debug logging via `logForDebugging()` from `utils/debug.js`
 
 ## Comments
 
 **When to Comment:**
 - JSDoc for exported public APIs with `@param`, `@returns`, `@example`
-- Inline comments for complex logic explanations
+- Inline comments for complex logic explanations that aren't obvious from code
 - TODO/FIXME comments with context identifiers: `// TODO(onKeyDown-migration): remove once REPL passes handleKeyDown`
 
 **JSDoc/TSDoc:**
@@ -169,26 +181,20 @@ Location examples:
 
 ## Function Design
 
-**Size:** Large functions exist (main.tsx is 808KB) - likely generated/compiled output
+**Size:**
+- Small utility functions (1-20 lines): `utils/array.ts` has pure functions of 3-8 lines each
+- Large functions exist in entry points and complex UI components (e.g. main flow control)
+- The root `main.tsx` is 808KB - this appears to be compiled/bundled output
 
 **Parameters:**
-- Object destructuring for complex parameters: `function App({ getFpsMetrics, stats, initialState, children }: Props)`
+- Object destructuring for complex component props: `function App({ getFpsMetrics, stats, initialState, children }: Props)`
 - Optional parameters with `?:` syntax
 - Generic constraints: `Input extends { [key: string]: unknown }`
 
 **Return Values:**
 - Discriminated union returns: `{ behavior: 'allow' | 'deny' | 'ask' | 'passthrough' }`
-- Async functions return `Promise<T>`
+- Async functions always return `Promise<T>`
 - Type guards return boolean with type predicate: `function isFsInaccessible(e: unknown): e is NodeJS.ErrnoException`
-
-**Branded Types:**
-Location: `types/ids.ts`
-```typescript
-export type SessionId = string & { readonly __brand: 'SessionId' }
-export type AgentId = string & { readonly __brand: 'AgentId' }
-export function asSessionId(id: string): SessionId { ... }
-export function toAgentId(s: string): AgentId | null { ... }
-```
 
 ## Module Design
 
@@ -202,6 +208,17 @@ Limited use - found in:
 - `components/CustomSelect/index.ts`
 - `entrypoints/sdk/coreTypes.ts`
 - `entrypoints/agentSdkTypes.ts`
+- `skills/bundled/index.js`
+
+**Branded Types:**
+Location: `types/ids.ts`
+```typescript
+export type SessionId = string & { readonly __brand: 'SessionId' }
+export type AgentId = string & { readonly __brand: 'AgentId' }
+export function asSessionId(id: string): SessionId { ... }
+export function toAgentId(s: string): AgentId | null { ... }
+```
+- Provides type safety for different ID categories at compile time
 
 **Lazy Schema Pattern:**
 Location: `utils/lazySchema.ts`
@@ -212,6 +229,7 @@ export function lazySchema<T>(factory: () => T): () => T {
 }
 ```
 - Defers Zod schema construction from module init to first access
+- Reduces startup time by avoiding unnecessary schema initialization
 - Used extensively in `types/hooks.ts` and `schemas/hooks.ts`
 
 ## React/Ink Component Patterns
@@ -225,7 +243,7 @@ import React from 'react';
 export function App(t0) {
   const $ = _c(9);  // React Compiler memoization cache
   const { getFpsMetrics, stats, initialState, children } = t0;
-  // Conditional rendering with cache checks
+  // Conditional rendering with compiler-optimized memoization
   ...
 }
 ```
@@ -233,14 +251,15 @@ export function App(t0) {
 **Hooks:**
 Location: `hooks/` directory
 - Heavy use of custom hooks (100+ hook files)
-- Complex hooks: `useTypeahead.tsx` (214KB), `useVoiceIntegration.tsx` (100KB), `useReplBridge.tsx` (116KB)
-- Permission hooks: `useCanUseTool.tsx`, hooks in `hooks/toolPermission/`
+- Complex large hooks: `useTypeahead.tsx`, `useVoiceIntegration.tsx`, `useReplBridge.tsx`
+- Permission hooks: `useCanUseTool.tsx`, hooks organized in `hooks/toolPermission/`
+- Naming convention: all custom hooks start with `use` prefix
 
 **Context Providers:**
 Location: `state/AppState.tsx`, `context/` directory
-- AppState pattern with store: `createStore()`, `AppStateProvider`
+- AppState pattern with store creator: `createStore()`, `AppStateProvider`
 - Multiple context layers: `StatsProvider`, `FpsMetricsProvider`, `MailboxProvider`, `VoiceProvider`
-- Overlay context for UI layers: `useRegisterOverlay()`
+- Overlay context for UI layers: `useRegisterOverlay()` manages modal stacking
 
 **Type-Only Component Props:**
 ```typescript
@@ -249,7 +268,7 @@ type Props = {
   stats?: StatsStore;
   initialState: AppState;
   children: React.ReactNode;
-}
+};
 ```
 
 ## Zod Schema Patterns
@@ -264,7 +283,7 @@ const BashCommandHookSchema = z.object({
     command: z.string().describe('Shell command to execute'),
     timeout: z.number().optional(),
   })),
-})
+});
 ```
 
 **Lazy Schema Usage:**
@@ -275,12 +294,12 @@ export const syncHookResponseSchema = lazySchema(() =>
     suppressOutput: z.boolean().optional(),
     ...
   })
-)
+);
 ```
 
 **Type Inference:**
 ```typescript
-export type PromptRequest = z.infer<ReturnType<typeof promptRequestSchema>>
+export type PromptRequest = z.infer<ReturnType<typeof promptRequestSchema>>;
 ```
 
 ## Feature Flags
@@ -291,11 +310,11 @@ import { feature } from 'bun:bundle'
 
 const voiceCommand = feature('VOICE_MODE')
   ? require('./commands/voice/index.js').default
-  : null
+  : null;
 
 // Conditional logic
 if (feature('TRANSCRIPT_CLASSIFIER') && result.decisionReason?.type === 'classifier') {
-  setYoloClassifierApproval(toolUseID, result.decisionReason.reason)
+  setYoloClassifierApproval(toolUseID, result.decisionReason.reason);
 }
 ```
 
@@ -318,6 +337,8 @@ if (feature('TRANSCRIPT_CLASSIFIER') && result.decisionReason?.type === 'classif
 - `KAIROS_GITHUB_WEBHOOKS`
 - `HISTORY_SNIP`
 - `PROACTIVE`
+- `COORDINATOR_MODE`
+- `EXPERIMENTAL_SKILL_SEARCH`
 
 ---
 

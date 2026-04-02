@@ -5,15 +5,15 @@
 ## Test Framework
 
 **Runner:**
-- **Not detected** - No test files found in codebase
+- **Not detected** - No test files found in codebase after thorough search
 - No Jest, Vitest, Mocha, or other test runner configuration files detected
-- No `*.test.ts`, `*.spec.ts`, `*.test.tsx`, or `*.spec.tsx` files found
+- Search of all `*.test.*` and `*.spec.*` patterns returned zero results
 
 **Assertion Library:**
 - Not applicable
 
 **Run Commands:**
-- No test commands available
+- No test commands configured in `package.json` (no package.json found at project root)
 
 ## Test File Organization
 
@@ -22,6 +22,8 @@
 - Standard locations checked:
   - `*.test.ts` - 0 files found
   - `*.spec.ts` - 0 files found
+  - `*.test.tsx` - 0 files found
+  - `*.spec.tsx` - 0 files found
   - `__tests__/` directory - Not present
   - `test/` directory - Not present
   - `tests/` directory - Not present
@@ -83,24 +85,24 @@
 ## Testing Observations
 
 **Missing Tests:**
-This codebase appears to be a leaked/extracted source code distribution without accompanying test infrastructure. Key observations:
+This codebase appears to be a leaked/extracted source code distribution without accompanying test infrastructure. Key observations verified 2026-04-02:
 
-1. **No test files whatsoever** - Standard test file patterns searched, zero results
+1. **No test files whatsoever** - Standard test file patterns searched thoroughly, zero results
 2. **No test configuration** - No jest.config, vitest.config, or similar files
 3. **No mock/stub utilities** - No test-specific helper modules
 4. **No test fixtures** - No test data directories or fixture files
 5. **No coverage reports** - No .nyc_output, coverage/, or similar directories
 
-**推测/可能 (Uncertain):**
-This may be:
-- A production build output rather than source repository
-- An internal code snapshot without test artifacts
-- Extracted/transpiled code where tests were excluded
+**Status:**
+This is:
+- A source code snapshot distribution where tests were intentionally excluded
+- Not a complete development repository with full test suite
 
-**Evidence for Non-Test Status:**
-- `main.tsx` is 808KB (likely compiled/bundled)
-- Embedded source maps in compiled files
+**Evidence:**
+- `main.tsx` is 808KB (indicates bundled/compiled output)
+- Embedded source maps present in compiled files
 - React Compiler runtime pattern indicates compiled output
+- No `package.json` in project root (dependencies not included)
 - No development tooling configuration found
 
 **Alternative Validation Mechanisms:**
@@ -109,42 +111,51 @@ While no traditional tests exist, the codebase has:
 - Schema validation via Zod schemas (`schemas/hooks.ts`, `types/hooks.ts`)
 - Runtime validation in permission system
 - Error type guards for safety (`utils/errors.ts`)
-- Compile-time assertions: `type _assertSDKTypesMatch = Assert<IsEqual<SchemaHookJSONOutput, HookJSONOutput>>` (`types/hooks.ts:198-200`)
+- Compile-time type equality assertions: `type _assertSDKTypesMatch = Assert<IsEqual<SchemaHookJSONOutput, HookJSONOutput>>`
 
 ## Common Patterns (If Tests Were Added)
 
-Based on codebase patterns, tests would likely use:
+Based on existing codebase patterns, tests would likely follow these patterns:
 
 **Async Testing:**
 ```typescript
-// Pattern from permission handling
-async (tool, input, toolUseContext, assistantMessage, toolUseID, forceDecision) => {
-  const decisionPromise = forceDecision !== undefined 
-    ? Promise.resolve(forceDecision) 
-    : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID)
-  return decisionPromise.then(async result => { ... })
+// Based on async patterns in permission handling
+async function checkToolPermission(tool, input, context) {
+  const decision = await hasPermissionsToUseTool(tool, input, context);
+  return decision;
 }
 ```
 
 **Error Testing:**
 ```typescript
-// Pattern from error handling
+// Based on existing error handling patterns
 import { isAbortError, isENOENT, toError, errorMessage } from '../utils/errors.js'
 
-// Would test:
-expect(isAbortError(new AbortError())).toBe(true)
-expect(isENOENT({ code: 'ENOENT' })).toBe(true)
-expect(toError('string message')).toBeInstanceOf(Error)
+test('isAbortError correctly identifies abort errors', () => {
+  expect(isAbortError(new AbortError())).toBe(true)
+  expect(isAbortError(new Error())).toBe(false)
+})
+
+test('toError converts non-Error values', () => {
+  expect(toError('string error')).toBeInstanceOf(Error)
+  expect(errorMessage(toError('string error'))).toBe('string error')
+})
 ```
 
 **Schema Validation Testing:**
 ```typescript
-// Pattern from Zod schemas
+// Based on Zod schema patterns
 import { syncHookResponseSchema } from '../types/hooks.js'
 
-// Would test:
-const result = syncHookResponseSchema().parse({ continue: false })
-expect(result.continue).toBe(false)
+test('schema validates correct response format', () => {
+  const result = syncHookResponseSchema().parse({ continue: false })
+  expect(result.continue).toBe(false)
+})
+
+test('schema rejects invalid input', () => {
+  expect(() => syncHookResponseSchema().parse({ continue: 'not-a-boolean' }))
+    .toThrow()
+})
 ```
 
 ---

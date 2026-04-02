@@ -2,6 +2,9 @@
 
 **分析日期:** 2026-04-02
 
+> **前置知识:** 阅读本文前，建议先阅读:
+> - [03-工具系统设计](./03-工具系统设计.md) - 理解Tool接口与buildTool工厂
+
 ---
 
 ## 1. 概述
@@ -753,6 +756,423 @@ function processProgressMessages(
   
   return result
 }
+```
+
+---
+
+### 6.3 Coordinator协调器模式
+
+#### 协调器核心设计
+
+**文件位置:** `coordinator/coordinatorMode.ts`
+
+```typescript
+// 协调器模式检测 (行36-41)
+export function isCoordinatorMode(): boolean {
+  if (feature('COORDINATOR_MODE')) {
+    return isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE);
+  }
+  return false;
+}
+
+// 协调器系统提示 (行111-369)
+export function getCoordinatorSystemPrompt(): string {
+  return `You are Claude Code, an AI assistant that orchestrates 
+software engineering tasks across multiple workers.
+
+## 1. Your Role
+You are a **coordinator**. Your job is to:
+- Help the user achieve your goal
+- Direct workers to research, implement and verify code changes
+- Synthesize results and communicate with the user
+- Answer questions directly when possible
+
+## 2. Your Tools
+- **Agent** - Spawn a new worker
+- **SendMessage** - Continue an existing worker
+- **TaskStop** - Stop a running worker
+
+## 4. Task Workflow
+| Phase | Who | Purpose |
+|-------|-----|---------|
+| Research | Workers (parallel) | Investigate codebase |
+| Synthesis | **You** | Understand findings, craft specs |
+| Implementation | Workers | Make targeted changes |
+| Verification | Workers | Verify changes work |
+
+**Parallelism is your superpower.** Launch independent workers 
+concurrently whenever possible — don't serialize work that can 
+run simultaneously.
+`;
+}
+```
+
+#### 协调器与Worker通信
+
+```
+协调器                  Worker(s)
+   │                       │
+   │──Agent({prompt})──────┼──→ Worker A启动
+   │──Agent({prompt})──────┼──→ Worker B启动 (并行)
+   │                       │
+   │   (等待通知)          │   (执行任务)
+   │                       │
+   │←──<task-notification>─┼── Worker A完成
+   │←──<task-notification>─┼── Worker B完成
+   │                       │
+   │──SendMessage({to:id})─┼──→ 继续Worker A
+   │                       │
+   │←──<task-notification>─┼── Worker A再次完成
+   │                       │
+   │── (向用户汇报结果)    │
+```
+
+#### 任务分配决策
+
+**从协调器视角:**
+
+```typescript
+// coordinatorMode.ts 任务工作流指导
+
+// 并发管理原则:
+// - 只读任务（研究）→ 完全并行
+// - 写入任务（实现）→ 每个文件集一个代理
+// - 验证任务 → 可与实现任务并行（不同文件区域）
+
+// 继续vs新代理决策矩阵:
+// | 情况 | 机制 | 原因 |
+// |------|------|------|
+// | 研究精确覆盖编辑文件 | SendMessage继续 | Worker已有文件上下文 |
+// | 研究广但实现窄 | 新代理spawn | 避免拖拽探索噪音 |
+// | 纠正失败或扩展最近工作 | SendMessage继续 | Worker有错误上下文 |
+// | 验证不同代理写的代码 | 新代理spawn | 验证者需要新鲜视角 |
+// | 无关任务 | 新代理spawn | 无有用上下文 |
+```
+
+---
+
+### 6.4 任务分配策略
+
+#### LocalAgentTask 状态定义
+
+**文件位置:** `tasks/LocalAgentTask/LocalAgentTask.tsx`
+
+```typescript
+export type LocalAgentTaskState = {
+  id: string;
+  description: string;
+  status: TaskStatus;
+  selectedAgent: AgentDefinition;
+  abortController?: AbortController;
+  messages?: Message[];
+  pendingMessages: string[];
+  retain?: boolean;
+  evictAfter?: number;
+  endTime?: number;
+  outputFile?: string;
+  unregisterCleanup?: () => void;
+};
+```
+
+#### RemoteAgentTask 状态定义
+
+**远程执行环境（CCR）:** `tasks/RemoteAgentTask/RemoteAgentTask.tsx`
+
+```typescript
+export type RemoteAgentTaskState = {
+  id: string;
+  description: string;
+  status: TaskStatus;
+  sessionId: string;
+  url: string;
+  abortController?: AbortController;
+};
+```
+
+#### 优先级队列调度
+
+**消息队列优先级策略:** `messageQueueManager.ts`
+
+```typescript
+// 优先级: now > next > later
+// - now: 立即执行（用户输入）
+// - next: 下一个执行
+// - later: 任务通知，最后处理
+
+export function enqueuePendingNotification(command: QueuedCommand): void {
+  commandQueue.push({ ...command, priority: command.priority ?? 'later' });
+  notifySubscribers();  // 触发React订阅更新
+}
+
+// 用户输入永远优先于任务通知
+// 同级按FIFO顺序执行
+```
+
+---
+
+### 6.5 代理间通信
+
+#### task-notification格式
+
+**XML通知格式:** `constants/xml.ts`
+
+```xml
+<task-notification>
+  <task-id>{agentId}</task-id>
+  <tool-use-id>{toolUseId}</tool-use-id>  <!-- 可选 -->
+  <task-type>local_agent|remote_agent</task-type>
+  <output-file>{outputPath}</output-file>
+  <status>completed|failed|killed</status>
+  <summary>Agent "{description}" {statusText}</summary>
+  <result>{agent's final text response}</result>  <!-- 可选 -->
+  <usage>
+    <total_tokens>N</total_tokens>
+    <tool_uses>N</tool_uses>
+    <duration_ms>N</duration_ms>
+  </usage>  <!-- 可选 -->
+  <worktree>
+    <worktreePath>{path}</worktreePath>
+    <worktreeBranch>{branch}</worktreeBranch>
+  </worktree>  <!-- 可选 -->
+</task-notification>
+```
+
+#### SendMessage工具消息传递
+
+```typescript
+// SendMessageTool.ts 消息路由 (行149-189)
+
+async function handleMessage(
+  recipientName: string,
+  content: string,
+  summary: string | undefined,
+  context: ToolUseContext
+): Promise<{ data: MessageOutput }> {
+  // 1. 写入邮箱
+  await writeToMailbox(
+    recipientName,
+    {
+      from: senderName,
+      text: content,
+      summary,
+      timestamp: new Date().toISOString(),
+      color: senderColor
+    },
+    teamName
+  );
+  
+  // 2. 返回路由信息
+  return {
+    data: {
+      success: true,
+      message: `Message sent to ${recipientName}'s inbox`,
+      routing: {
+        sender: senderName,
+        senderColor,
+        target: `@${recipientName}`,
+        targetColor: recipientColor,
+        summary,
+        content
+      }
+    }
+  };
+}
+```
+
+#### 状态同步
+
+```typescript
+// LocalAgentTask.tsx 消息队列管理 (行162-192)
+
+// 添加消息到pending队列
+export function queuePendingMessage(
+  taskId: string,
+  msg: string,
+  setAppState: SetAppState
+): void {
+  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => ({
+    ...task,
+    pendingMessages: [...task.pendingMessages, msg]
+  }));
+}
+
+// 排空pending消息
+export function drainPendingMessages(
+  taskId: string,
+  getAppState: () => AppState,
+  setAppState: SetAppState
+): string[] {
+  const task = getAppState().tasks[taskId];
+  if (!isLocalAgentTask(task) || task.pendingMessages.length === 0) {
+    return [];
+  }
+  
+  const drained = task.pendingMessages;
+  updateTaskState<LocalAgentTaskState>(taskId, setAppState, t => ({
+    ...t,
+    pendingMessages: []  // 清空队列
+  }));
+  
+  return drained;  // 返回排空的消息
+}
+```
+
+---
+
+### 6.6 后台任务管理
+
+#### tasks/ 目录结构
+
+```
+tasks/
+├── types.ts                    # 任务状态类型定义
+├── LocalAgentTask/
+│   └── LocalAgentTask.tsx      # 本地代理任务
+├── RemoteAgentTask/
+│   └── RemoteAgentTask.tsx     # 远程代理任务
+├── LocalShellTask/
+│   ├── LocalShellTask.tsx      # Shell后台任务
+│   ├── guards.ts               # 类型守卫
+│   └── killShellTasks.js       # 清理函数
+├── InProcessTeammateTask/
+│   ├── InProcessTeammateTask.tsx  # 进程内队友
+│   └── types.ts                # 类型定义
+├── LocalWorkflowTask/
+│   └── LocalWorkflowTask.ts    # 工作流任务
+├── DreamTask/
+│   └── DreamTask.ts            # Dream任务
+├── MonitorMcpTask/
+│   └── MonitorMcpTask.ts       # MCP监控任务
+├── LocalMainSessionTask.ts     # 主会话任务
+├── stopTask.ts                 # 任务停止工具
+└── pillLabel.ts                # 状态徽章
+```
+
+#### 任务生命周期
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     任务生命周期                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────┐                                                │
+│  │ pending │ ← 任务注册（等待执行）                           │
+│  └────┬────┘                                                │
+│       │                                                     │
+│       ▼                                                     │
+│  ┌─────────┐                                                │
+│  │ running │ ← 执行中（流式输出）                             │
+│  └────┬────┘                                                │
+│       │                                                     │
+│       ├─────────────────────────────────────┐               │
+│       │                                     │               │
+│       ▼                                     ▼               │
+│  ┌──────────┐                          ┌──────────┐         │
+│  │ completed│                          │  killed  │         │
+│  └─────┬────┘                          └─────┬────┘         │
+│        │                                     │              │
+│        │                                     │              │
+│  ┌─────▼────┐                          ┌─────▼────┐         │
+│  │ notified │ ← 发送通知到队列            │ notified │         │
+│  └─────┬────┘                          └─────┬────┘         │
+│        │                                     │              │
+│        ▼                                     ▼              │
+│  ┌───────────┐                          ┌───────────┐       │
+│  │  evicted  │ ← 从AppState移除           │  evicted  │       │
+│  └───────────┘                          └───────────┘       │
+│                                                             │
+│       ┌──────────┐                                          │
+│       │  failed  │ ← 执行错误                               │
+│       └─────┬────┘                                          │
+│             │                                               │
+│             ▼                                               │
+│       ┌───────────┐                                         │
+│       │  notified │                                         │
+│       └─────┬─────┘                                         │
+│             │                                               │
+│             ▼                                               │
+│       ┌───────────┐                                         │
+│       │  evicted  │                                         │
+│       └───────────┘                                         │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 超时与中断处理
+
+```typescript
+// LocalAgentTask.tsx killAsyncAgent (行281-303)
+
+export function killAsyncAgent(taskId: string, setAppState: SetAppState): void {
+  let killed = false;
+  
+  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
+    if (task.status !== 'running') return task;  // 非运行态不处理
+    
+    killed = true;
+    task.abortController?.abort();  // 中止API调用
+    task.unregisterCleanup?.();     // 清理注册
+    
+    return {
+      ...task,
+      status: 'killed',
+      endTime: Date.now(),
+      evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
+      abortController: undefined,
+      unregisterCleanup: undefined,
+      selectedAgent: undefined  // 释放代理定义引用
+    };
+  });
+  
+  if (killed) {
+    void evictTaskOutput(taskId);  // 清理输出文件
+  }
+}
+
+// 批量杀死所有运行代理 (行309-315)
+export function killAllRunningAgentTasks(
+  tasks: Record<string, TaskState>,
+  setAppState: SetAppState
+): void {
+  for (const [taskId, task] of Object.entries(tasks)) {
+    if (task.type === 'local_agent' && task.status === 'running') {
+      killAsyncAgent(taskId, setAppState);
+    }
+  }
+}
+```
+
+#### 任务驱逐策略
+
+```typescript
+// framework.ts evictTerminalTask (行125-144)
+
+export function evictTerminalTask(
+  taskId: string,
+  setAppState: SetAppState
+): void {
+  setAppState(prev => {
+    const task = prev.tasks?.[taskId];
+    
+    // 驱逐条件检查:
+    // 1. 任务存在
+    // 2. 终态（completed/failed/killed）
+    // 3. 已通知（notified=true）
+    // 4. 非UI持有（retain=false）
+    // 5. 驱逐截止时间已过
+    
+    if (!isTerminalTaskStatus(task.status)) return prev;
+    if (!task.notified) return prev;
+    if ('retain' in task && (task.evictAfter ?? Infinity) > Date.now()) {
+      return prev;  // Panel宽限期未过
+    }
+    
+    const { [taskId]: _, ...remainingTasks } = prev.tasks;
+    return { ...prev, tasks: remainingTasks };
+  });
+}
+
+// PANEL_GRACE_MS = 30_000  ← Panel显示30秒后才驱逐
 ```
 
 ---
